@@ -1,0 +1,52 @@
+cask "vpnrouter" do
+  version "2.27.2"
+  sha256 "ed2b9cc66af4089da225ba13ee23906d7ed655be0cec27888dabae4be2713343"
+
+  url "https://github.com/PavelLizunov/VPNRouter/releases/download/v#{version}/VPNRouter-v#{version}-mac.dmg",
+      verified: "github.com/PavelLizunov/VPNRouter/"
+  name "VPNRouter"
+  desc "Process-based split-tunnel VPN router via VLESS+Reality (sing-box TUN)"
+  homepage "https://github.com/PavelLizunov/VPNRouter"
+
+  # Apple Silicon only for now — dotnet publish targets osx-arm64, and the
+  # macOS DMG contains an arm64-only binary. Intel users should use the
+  # tar.gz / Windows / Linux distribution, or wait for a universal build.
+  depends_on arch: :arm64
+  depends_on macos: ">= :monterey" # matches Info.plist LSMinimumSystemVersion=12.0
+
+  app "VPNRouter.app"
+
+  # First-run sudoers setup: the app guides the user through creating
+  # /etc/sudoers.d/vpnrouter with a NOPASSWD entry for sing-box so the
+  # TUN adapter can be brought up without a password prompt on every
+  # Connect. See the InstallGuide.html bundled in the DMG for the one-time
+  # two-line sudo command the user runs at first launch.
+  #
+  # brew uninstall doesn't touch /etc/sudoers.d (on purpose — it's outside
+  # brew's jurisdiction). `zap` below offers the caller a way to clean the
+  # user-level state (Application Support, preferences, logs) on
+  # `brew uninstall --zap`. To fully remove the sudoers entry:
+  #   sudo rm /etc/sudoers.d/vpnrouter
+  zap trash: [
+    "~/Library/Application Support/VPNRouter",
+    "~/Library/Preferences/com.vpnrouter.app.plist",
+    "~/Library/Logs/VPNRouter",
+    "~/Library/Caches/com.vpnrouter.app",
+  ]
+
+  caveats <<~EOS
+    VPNRouter needs root for TUN adapter creation.
+
+    On first Connect the app pops a one-time password prompt and writes
+    /etc/sudoers.d/vpnrouter with a NOPASSWD entry specifically for the
+    bundled sing-box binary. After that, every VPN start is passwordless.
+
+    To fully uninstall (including the sudoers entry):
+      brew uninstall --zap --cask vpnrouter
+      sudo rm /etc/sudoers.d/vpnrouter
+
+    If you use Little Snitch / LuLu / other network monitors, the first
+    Connect will surface prompts for VPNRouter.App and sing-box — allow
+    both.
+  EOS
+end

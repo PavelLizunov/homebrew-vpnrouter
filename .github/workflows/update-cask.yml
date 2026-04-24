@@ -1,0 +1,177 @@
+name: Update VPNRouter Cask
+
+# Triggered by:
+#  - repository_dispatch from the main VPNRouter repo on stable release
+#    (see PavelLizunov/VPNRouter/.github/workflows/build-mac.yml, which
+#    sends `event_type: vpnrouter-release` with the new version + tag)
+#  - manual dispatch (paste a version string to re-sync the cask)
+#  - daily schedule as a safety net in case the cross-repo dispatch
+#    is ever missed (e.g. GH Actions outage)
+on:
+  repository_dispatch:
+    types: [vpnrouter-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "VPNRouter version without 'v' prefix (e.g. 2.27.3). Leave blank to auto-detect latest stable."
+        required: false
+        default: ""
+  schedule:
+    # Once a day at 05:23 UTC — off-peak, off the hour. If the main
+    # repo dispatch fires correctly (on every release publish), this
+    # scheduled run is usually a no-op ("already up to date"). Safety
+    # net for dropped webhooks.
+    - cron: "23 5 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+
+      - name: Resolve target version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Priority: dispatch payload > manual input > latest stable on GitHub
+          if [ -n "${{ github.event.client_payload.version || '' }}" ]; then
+              VER="${{ github.event.client_payload.version }}"
+              SOURCE="repository_dispatch payload"
+          elif [ -n "${{ github.event.inputs.version || '' }}" ]; then
+              VER="${{ github.event.inputs.version }}"
+              SOURCE="workflow_dispatch input"
+          else
+              # Latest STABLE release (skip prereleases + rolling -rN candidates)
+              VER=$(gh release list --repo PavelLizunov/VPNRouter --limit 20 --json tagName,isPrerelease \
+                    --jq 'first(.[] | select(.isPrerelease == false) | .tagName)' \
+                    | sed 's/^v//')
+              SOURCE="latest stable on GitHub"
+          fi
+
+          if [ -z "$VER" ]; then
+              echo "::error::Could not resolve a target version"
+              exit 1
+          fi
+
+          # Strip leading 'v' if someone passed one
+          VER="${VER#v}"
+
+          # Safety: reject rolling-candidate versions (2.27.3-r1 etc.) —
+          # the cask should ONLY track stable releases. Users wanting to
+          # test prereleases download the DMG manually from GitHub.
+          case "$VER" in
+              *-r[0-9]*|*-rc*|*-beta*|*-alpha*|*-pre*)
+                  echo "::warning::$VER looks like a prerelease — refusing to bump cask"
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+          esac
+
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Resolved: $VER (from $SOURCE)"
+
+      - name: Skip if no bump
+        if: steps.version.outputs.skip == 'true'
+        run: |
+          echo "::notice::Skipping — dispatched with a prerelease version"
+          exit 0
+
+      - name: Read current cask version
+        if: steps.version.outputs.skip != 'true'
+        id: current
+        run: |
+          CURRENT=$(grep -E '^\s*version\s+"' Casks/vpnrouter.rb \
+                    | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Current cask version: $CURRENT"
+          echo "Target version:       ${{ steps.version.outputs.version }}"
+
+      - name: Exit if already up to date
+        if: steps.version.outputs.skip != 'true' && steps.current.outputs.version == steps.version.outputs.version
+        run: |
+          echo "::notice::Cask already at version ${{ steps.current.outputs.version }} — nothing to do"
+          exit 0
+
+      - name: Download fresh DMG + compute SHA256
+        if: steps.version.outputs.skip != 'true' && steps.current.outputs.version != steps.version.outputs.version
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.version }}"
+          URL="https://github.com/PavelLizunov/VPNRouter/releases/download/v${VER}/VPNRouter-v${VER}-mac.dmg"
+
+          # Retry: the main repo's build-mac job may still be in-flight
+          # uploading the DMG when the dispatch arrives. Wait up to ~3 min.
+          for attempt in 1 2 3 4 5 6; do
+              if curl -fsSL -o /tmp/vpnrouter.dmg "$URL"; then
+                  break
+              fi
+              echo "attempt $attempt: DMG not available yet, waiting 30s..."
+              sleep 30
+          done
+          if [ ! -s /tmp/vpnrouter.dmg ]; then
+              echo "::error::DMG download failed after 6 attempts"
+              exit 1
+          fi
+
+          SHA=$(shasum -a 256 /tmp/vpnrouter.dmg | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "DMG size: $(du -h /tmp/vpnrouter.dmg | cut -f1)"
+          echo "SHA256:   $SHA"
+          rm -f /tmp/vpnrouter.dmg
+
+      - name: Update cask file
+        if: steps.sha.outputs.sha != ''
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+          NEW_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # In-place update via awk (BSD sed portability is awful).
+          # Match only the top-level version/sha256 lines, not anything
+          # inside caveats/comments.
+          awk -v ver="$NEW_VERSION" -v sha="$NEW_SHA" '
+              /^  version "/  { print "  version \"" ver "\""; next }
+              /^  sha256 "/   { print "  sha256 \"" sha "\""; next }
+              { print }
+          ' Casks/vpnrouter.rb > /tmp/vpnrouter.rb.new
+          mv /tmp/vpnrouter.rb.new Casks/vpnrouter.rb
+
+          echo "Updated cask file:"
+          grep -E '^\s*(version|sha256)\s+"' Casks/vpnrouter.rb
+
+      - name: Verify cask parses + style
+        if: steps.sha.outputs.sha != ''
+        run: |
+          # `brew audit` checks for common mistakes; `brew style` enforces
+          # Homebrew's Ruby style. Non-fatal if tap isn't installed yet.
+          brew tap pavellizunov/vpnrouter "$GITHUB_WORKSPACE" 2>/dev/null || true
+          brew audit --cask Casks/vpnrouter.rb 2>&1 | head -40 || true
+          brew style Casks/vpnrouter.rb 2>&1 | head -40 || true
+
+      - name: Commit + push
+        if: steps.sha.outputs.sha != ''
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+          SOURCE: ${{ steps.version.outputs.source }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/vpnrouter.rb
+          git commit -m "vpnrouter $NEW_VERSION
+
+          Auto-bump from $SOURCE.
+          SHA256: ${{ steps.sha.outputs.sha }}"
+          git push origin HEAD:main
+          echo "::notice::Cask bumped to $NEW_VERSION"
