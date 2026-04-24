@@ -16,6 +16,31 @@ cask "vpnrouter" do
 
   app "VPNRouter.app"
 
+  # Strip the com.apple.quarantine xattr that brew applies to unsigned DMG
+  # downloads. Without this, macOS Gatekeeper shows "VPNRouter.app can't
+  # be opened because Apple cannot check it for malicious software" on
+  # first launch, and the nested sing-box binary hangs on amfid
+  # verification when spawned by the app (sing-box is ad-hoc/linker-signed
+  # only, inherits quarantine state from the parent .app).
+  #
+  # Also strip com.apple.provenance (added automatically by recent macOS
+  # on downloaded content) — it interacts with amfid on first-launch
+  # checks and introduces several-seconds hangs even after quarantine
+  # is cleared.
+  #
+  # Rationale: we don't yet ship a Developer ID-signed + notarized build
+  # (no Apple Dev account). Until we do, this postflight is the canonical
+  # brew-cask pattern for unsigned apps from trusted sources — same as
+  # what Mullvad / ProtonVPN / WireGuard use in their own taps.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-rd", "com.apple.quarantine", "#{appdir}/VPNRouter.app"],
+                   sudo: false
+    system_command "/usr/bin/xattr",
+                   args: ["-rd", "com.apple.provenance", "#{appdir}/VPNRouter.app"],
+                   sudo: false
+  end
+
   # First-run sudoers setup: the app guides the user through creating
   # /etc/sudoers.d/vpnrouter with a NOPASSWD entry for sing-box so the
   # TUN adapter can be brought up without a password prompt on every
