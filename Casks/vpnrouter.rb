@@ -1,6 +1,6 @@
 cask "vpnrouter" do
-  version "2.30.0"
-  sha256 "239a9e0b613a726b2d05e766a6777315c83afab9c7d59189e4ae446450e93dfc"
+  version "2.30.1"
+  sha256 "3687391584ef6bf091c95af660f6b17046ca930a8af0a8f47905a278bb52f1af"
 
   url "https://github.com/PavelLizunov/VPNRouter/releases/download/v#{version}/VPNRouter-v#{version}-mac.dmg",
       verified: "github.com/PavelLizunov/VPNRouter/"
